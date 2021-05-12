@@ -28,9 +28,12 @@ class DHIS2:
                 self.org_units['organisationUnits'] += page['organisationUnits']
             print("Page {} of {}".format(index + 1, page['pager']['pageCount']))
 
+        # delete pager
+        if 'pager' in self.org_units:
+            del self.org_units['pager']
+
     def __save_org_units(self):
         print('Saving org units to {} ... '.format(self.__org_unit_file_name), end=" ")
-        del self.org_units['pager']
         with open(self.__org_unit_file_name, 'w') as f:
             json.dump(self.org_units, f)
         print('Done')
