@@ -3,7 +3,9 @@ from dhis2 import Api
 import json
 from os.path import exists
 from csv import writer
+import concurrent.futures
 
+# please specify the server address, username and password here.
 SERVER = ''
 USERNAME = ''
 PASSWORD = ''
@@ -12,11 +14,11 @@ ORG_UNIT_FIELDS = 'id,name,shortName,featureType,coordinates,parent'
 DATA_ELEMENTS_GROUP_FIELDS = 'id,name,dataElements'
 PAGE_SIZE = 50
 ORG_UNIT_START_POS = 0
-NUM_HEALTH_FACILITIES_PER_FILE = 200
-DATA_SET_ID = 'LNLZYbrGEh6'  # dataSet
+DATA_SET_ID = ''  # please specify the dataset ID here
 
 YEARS = ['2010', '2011', '2012', '2013']
 MONTHS = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+TEMP_DATA_FILE_PATH = 'data/temp_files/'
 
 
 class DHIS2:
@@ -34,7 +36,6 @@ class DHIS2:
         self.__category_option_combos_file_name = 'metadata/CategoryOptionCombos.json'
         self.__data_elements_file_name = 'metadata/DataElements.json'
         self.__data_element_groups_file_name = 'metadata/DataElementGroups.json'
-        self.__data_file_name = 'data/Data{}.csv'
 
         # for year in YEARS:
         #     one_year_period = []
@@ -100,49 +101,42 @@ class DHIS2:
                                                 'groupName': self.__get_data_element_group_name(de['id'])}
             print("Page {} of {}".format(index + 1, page['pager']['pageCount']))
 
+    def __download_org_unit_data(self, org_unit):
+        print("Downloading data for org unit ... {}".format(org_unit['name']))
+
+        r = self.api.get('dataValueSets', params={
+            'dataSet': [DATA_SET_ID],
+            'orgUnit': [org_unit['id']],
+            'period': ','.join(self.__period)  # p
+        })
+
+        data_values = r.json()
+        if data_values:
+            # save the header
+            if exists('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit['id'])):
+                os.remove('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit['id']))
+
+            self.__save_data([['OrgUnitId', 'OrgUnitName', 'DataElement', 'DataElementGroup', 'Period',
+                               'CategoryOption', 'AttributeOption', 'Value', 'StoredBy', 'Created', 'LastUpdated',
+                               'Comment', 'FollowUp']], org_unit['id'])
+
+            data = []
+            for d in data_values['dataValues']:
+                data.append([org_unit['id'], org_unit['name'], self.data_elements[d['dataElement']]['name'],
+                             self.data_elements[d['dataElement']]['groupName'], DHIS2.get_data(d, 'period'),
+                             self.category_option_combos[d['categoryOptionCombo']],
+                             self.category_option_combos[d['attributeOptionCombo']], DHIS2.get_data(d, 'value'),
+                             DHIS2.get_data(d, 'storedBy'), DHIS2.get_data(d, 'created'),
+                             DHIS2.get_data(d, 'lastUpdated'), DHIS2.get_data(d, 'comment'),
+                             DHIS2.get_data(d, 'followup')])
+
+            self.__save_data(data, org_unit['id'])
+
     def __download_data(self):
+        # download 20 health facility data at a time
         print('Downloading org units...')
-        for index, org_unit in enumerate(self.org_units['organisationUnits'][ORG_UNIT_START_POS:]):
-            adjusted_index = index + ORG_UNIT_START_POS
-            if int(adjusted_index % NUM_HEALTH_FACILITIES_PER_FILE) == 0:
-                # delete data file if it exists
-                self.__delete_data_file()
-                # write header
-                self.__save_data([['OrgUnitId', 'OrgUnitName', 'DataElement', 'DataElementGroup', 'Period',
-                                   'CategoryOption', 'AttributeOption', 'Value', 'StoredBy', 'Created', 'LastUpdated',
-                                   'Comment', 'FollowUp']], adjusted_index)
-
-            print("{}. Downloading data for org unit ... {}".format(adjusted_index + 1, org_unit['name']))
-            # for p in self.__period:
-            r = self.api.get('dataValueSets', params={
-                'dataSet': [DATA_SET_ID],
-                'orgUnit': [org_unit['id']],
-                'period': ','.join(self.__period)  # p
-            })
-            # Download Done
-            print('... D')
-
-            data_values = r.json()
-            if data_values:
-                data = []
-                for d in data_values['dataValues']:
-                    data.append([org_unit['id'], org_unit['name'], self.data_elements[d['dataElement']]['name'],
-                                 self.data_elements[d['dataElement']]['groupName'], DHIS2.get_data(d, 'period'),
-                                 self.category_option_combos[d['categoryOptionCombo']],
-                                 self.category_option_combos[d['attributeOptionCombo']], DHIS2.get_data(d, 'value'),
-                                 DHIS2.get_data(d, 'storedBy'), DHIS2.get_data(d, 'created'),
-                                 DHIS2.get_data(d, 'lastUpdated'), DHIS2.get_data(d, 'comment'),
-                                 DHIS2.get_data(d, 'followup')])
-                # Data Prep Done
-                print('... P')
-
-                self.__save_data(data, adjusted_index)
-
-                # Data Save Done
-                print('... S')
-            else:
-                # Has no data
-                print('... N')
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            executor.map(self.__download_org_unit_data, self.org_units['organisationUnits'][ORG_UNIT_START_POS:])
 
         print('Done')
 
@@ -176,8 +170,9 @@ class DHIS2:
             json.dump(self.data_elements, f)
         print('Done')
 
-    def __save_data(self, data, index):
-        with open(self.__data_file_name.format(int(index / NUM_HEALTH_FACILITIES_PER_FILE)), 'a+',
+    @staticmethod
+    def __save_data(data, org_unit_id):
+        with open('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit_id), 'a+',
                   newline='\n') as write_obj:
             csv_writer = writer(write_obj)
             for d in data:
@@ -234,10 +229,6 @@ class DHIS2:
         else:
             self.__download_data_elements()
             self.__save_data_elements()
-
-    def __delete_data_file(self):
-        if exists(self.__data_file_name):
-            os.remove(self.__data_file_name)
 
     def run(self):
         self.config_org_unit()
