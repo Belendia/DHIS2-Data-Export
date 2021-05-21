@@ -4,8 +4,10 @@ import json
 from os.path import exists
 from csv import writer
 import concurrent.futures
+import pandas as pd
+from pathlib import Path
 
-# please specify the server address, username and password here.
+# TODO: please specify the server address, username and password here.
 SERVER = ''
 USERNAME = ''
 PASSWORD = ''
@@ -14,11 +16,16 @@ ORG_UNIT_FIELDS = 'id,name,shortName,featureType,coordinates,parent'
 DATA_ELEMENTS_GROUP_FIELDS = 'id,name,dataElements'
 PAGE_SIZE = 50
 ORG_UNIT_START_POS = 0
-DATA_SET_ID = ''  # please specify the dataset ID here
+# TODO: please specify the dataset ID here
+DATA_SET_ID = ''
 
 YEARS = ['2010', '2011', '2012', '2013']
 MONTHS = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
 TEMP_DATA_FILE_PATH = 'data/temp_files/'
+FINAL_DATASET = 'data/dataset.csv'
+ORG_UNIT_CSV = 'metadata/OrgUnits.csv'
+ORG_UNIT_LEVELS = 7
+MAX_WORKERS = 20
 
 
 class DHIS2:
@@ -30,6 +37,7 @@ class DHIS2:
         self.data_elements = {}
         self.data_element_groups = {}
         self.__period = []
+        self.processed_ids = []
         self.data = []
 
         self.__org_unit_file_name = 'metadata/OrgUnits.json'
@@ -37,15 +45,29 @@ class DHIS2:
         self.__data_elements_file_name = 'metadata/DataElements.json'
         self.__data_element_groups_file_name = 'metadata/DataElementGroups.json'
 
+        # Download yearly data at one go
         # for year in YEARS:
         #     one_year_period = []
         #     for month in MONTHS:
         #         one_year_period.append("{}{}".format(year, month))
         #     self.__period.append(','.join(one_year_period))
 
+        # Download all year data at one go
+        # temp_period = []
+        # for year in YEARS:
+        #     for month in MONTHS:
+        #         temp_period.append("{}{}".format(year, month))
+        # self.__period.append(','.join(temp_period))
+        # temp_period = None
+
+        # Download quarterly data at one go
         for year in YEARS:
-            for month in MONTHS:
-                self.__period.append("{}{}".format(year, month))
+            three_months = []
+            for i, month in enumerate(MONTHS):
+                three_months.append("{}{}".format(year, month))
+                if (i + 1) % 3 == 0:
+                    self.__period.append(','.join(three_months))
+                    three_months.clear()
 
     def __download_org_units(self):
         print('Downloading org units...')
@@ -102,40 +124,51 @@ class DHIS2:
             print("Page {} of {}".format(index + 1, page['pager']['pageCount']))
 
     def __download_org_unit_data(self, org_unit):
+        if org_unit['id'] in self.processed_ids:
+            return
+
         print("Downloading data for org unit ... {}".format(org_unit['name']))
 
-        r = self.api.get('dataValueSets', params={
-            'dataSet': [DATA_SET_ID],
-            'orgUnit': [org_unit['id']],
-            'period': ','.join(self.__period)  # p
-        })
+        header_written = False
 
-        data_values = r.json()
-        if data_values:
-            # save the header
-            if exists('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit['id'])):
-                os.remove('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit['id']))
+        for p in self.__period:
 
-            self.__save_data([['OrgUnitId', 'OrgUnitName', 'DataElement', 'DataElementGroup', 'Period',
-                               'CategoryOption', 'AttributeOption', 'Value', 'StoredBy', 'Created', 'LastUpdated',
-                               'Comment', 'FollowUp']], org_unit['id'])
+            r = self.api.get('dataValueSets', params={
+                'dataSet': [DATA_SET_ID],
+                'orgUnit': [org_unit['id']],
+                'period': p
+            })
 
-            data = []
-            for d in data_values['dataValues']:
-                data.append([org_unit['id'], org_unit['name'], self.data_elements[d['dataElement']]['name'],
-                             self.data_elements[d['dataElement']]['groupName'], DHIS2.get_data(d, 'period'),
-                             self.category_option_combos[d['categoryOptionCombo']],
-                             self.category_option_combos[d['attributeOptionCombo']], DHIS2.get_data(d, 'value'),
-                             DHIS2.get_data(d, 'storedBy'), DHIS2.get_data(d, 'created'),
-                             DHIS2.get_data(d, 'lastUpdated'), DHIS2.get_data(d, 'comment'),
-                             DHIS2.get_data(d, 'followup')])
+            data_values = r.json()
 
-            self.__save_data(data, org_unit['id'])
+            if data_values:
+                # save the header
+                if not header_written:
+                    header_written = True
+                    self.remove_file(org_unit['id'])
 
-    def __download_data(self):
-        # download 20 health facility data at a time
+                    self.__save_data([['OrgUnitId', 'OrgUnitName', 'DataElement', 'DataElementGroup', 'Period',
+                                       'CategoryOption', 'AttributeOption', 'Value', 'StoredBy', 'Created',
+                                       'LastUpdated',
+                                       'Comment', 'FollowUp']], org_unit['id'])
+
+                data = []
+                for d in data_values['dataValues']:
+                    data.append([org_unit['id'], org_unit['name'], self.data_elements[d['dataElement']]['name'],
+                                 self.data_elements[d['dataElement']]['groupName'], DHIS2.get_data(d, 'period'),
+                                 self.category_option_combos[d['categoryOptionCombo']],
+                                 self.category_option_combos[d['attributeOptionCombo']], DHIS2.get_data(d, 'value'),
+                                 DHIS2.get_data(d, 'storedBy'), DHIS2.get_data(d, 'created'),
+                                 DHIS2.get_data(d, 'lastUpdated'), DHIS2.get_data(d, 'comment'),
+                                 DHIS2.get_data(d, 'followup')])
+
+                self.__save_data(data, org_unit['id'])
+
+    def download_data(self):
+        # download more than one health facility data at a time
         print('Downloading org units...')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             executor.map(self.__download_org_unit_data, self.org_units['organisationUnits'][ORG_UNIT_START_POS:])
 
         print('Done')
@@ -145,6 +178,11 @@ class DHIS2:
         if key in var:
             return var[key]
         return ''
+
+    @staticmethod
+    def remove_file(org_unit_id):
+        if exists('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit_id)):
+            os.remove('{}x_{}.csv'.format(TEMP_DATA_FILE_PATH, org_unit_id))
 
     def __save_org_units(self):
         print('Saving org units to {} ... '.format(self.__org_unit_file_name), end=" ")
@@ -208,6 +246,7 @@ class DHIS2:
         else:
             self.__download_org_units()
             self.__save_org_units()
+            self.org_unit_to_csv()
 
     def config_category_option_combo(self):
         if exists(self.__category_option_combos_file_name):
@@ -230,12 +269,93 @@ class DHIS2:
             self.__download_data_elements()
             self.__save_data_elements()
 
+    @staticmethod
+    def filter_data_and_merge_csv_files():
+        print('Filtering and merging data')
+        csv_folder = Path(TEMP_DATA_FILE_PATH).rglob('*.csv')
+        first = True
+        for i, f in enumerate(csv_folder):
+            print('Processing file {}'.format(i + 1))
+            df = pd.read_csv(f)
+            # TODO: Add data element names you want to filter here.
+            f_df = df[df['DataElement'].isin(['', ''])]
+
+            if len(f_df) > 0:
+                if first:
+                    first = False
+                    f_df.to_csv(FINAL_DATASET, index=False)
+                else:
+                    f_df.to_csv(FINAL_DATASET, mode='a', index=False, header=False)
+
+        print('Done')
+
+    def __restructure_org_units(self):
+        ous = {}
+        for ou in self.org_units['organisationUnits']:
+            ous[ou['id']] = ou
+        return ous
+
+    @staticmethod
+    def __save_org_unit_csv(data):
+        with open(ORG_UNIT_CSV, 'w',
+                  newline='\n') as write_obj:
+            csv_writer = writer(write_obj)
+            for d in data:
+                csv_writer.writerow(d)
+
+    def org_unit_to_csv(self):
+        csv = [['MOH', 'Region', 'Zone', 'Woreda', 'PHCU', 'HC', 'HP', 'OU_id']]
+        print('Exporting OrgUnits to CSV ... ', end="")
+        ous = self.__restructure_org_units()
+
+        for ou_id, ou in ous.items():
+            csv_row = [ou['name']]
+            if 'parent' in ou:
+                parent_ou_id = ou['parent']['id']
+                while parent_ou_id != '':
+                    parent_ou = ous[parent_ou_id]
+                    if 'parent' in parent_ou:
+                        parent_ou_id = parent_ou['parent']['id']
+                    else:
+                        parent_ou_id = ''
+                    csv_row.append(parent_ou['name'])
+
+                csv_row.reverse()
+                for i in range(ORG_UNIT_LEVELS - len(csv_row)):
+                    csv_row.append('')
+                csv_row.append(ou['id'])
+
+                csv.append(csv_row)
+
+        self.__save_org_unit_csv(csv)
+        print('Done')
+
+    @staticmethod
+    def join_org_unit_with_final_dataset():
+        print('Merging Org Unit with the final dataset', end='')
+        left_df = pd.read_csv(ORG_UNIT_CSV)
+        right_df = pd.read_csv(FINAL_DATASET)
+        merged_df = pd.merge(left_df, right_df, how='inner', left_on='OU_id', right_on='OrgUnitId')
+        merged_df.to_csv(FINAL_DATASET, index=False)
+        print('Done')
+
+    def downloaded_hfs(self):
+        csv_folder = Path(TEMP_DATA_FILE_PATH).rglob('*.csv')
+
+        for i, f in enumerate(csv_folder):
+            (name, ext) = os.path.splitext(os.path.basename(f))
+            self.processed_ids.append(name[2:])
+
     def run(self):
         self.config_org_unit()
         self.config_category_option_combo()
         self.config_data_element_group()
         self.config_data_element()
-        self.__download_data()
+
+        self.downloaded_hfs()
+        self.download_data()
+        self.filter_data_and_merge_csv_files()
+        self.join_org_unit_with_final_dataset()
 
 
 if __name__ == "__main__":
