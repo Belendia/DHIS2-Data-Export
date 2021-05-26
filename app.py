@@ -346,6 +346,22 @@ class DHIS2:
             (name, ext) = os.path.splitext(os.path.basename(f))
             self.processed_ids.append(name[2:])
 
+    @staticmethod
+    def convert_eth_greg(period):
+        month = {1: 9, 2: 10, 3: 11, 4: 12, 5: 1, 6: 2, 7: 3, 8: 4, 9: 5, 10: 6, 11: 7, 12: 8}
+        y = int(period[0:4])
+        m = int(period[4:6])
+        add_year = 7
+        if m > 4:
+            add_year = 8
+        return "{:04d}{:02d}".format(y + add_year, month[m])
+
+    @staticmethod
+    def convert_eth_to_greg_date():
+        df = pd.read_csv(FINAL_DATASET)
+        df['GregPeriod'] = df.apply(lambda row: DHIS2.convert_eth_greg(str(row.Period)), axis=1)
+        df.to_csv(FINAL_DATASET, index=False)
+
     def run(self):
         self.config_org_unit()
         self.config_category_option_combo()
@@ -356,6 +372,7 @@ class DHIS2:
         self.download_data()
         self.filter_data_and_merge_csv_files()
         self.join_org_unit_with_final_dataset()
+        self.convert_eth_to_greg_date()
 
 
 if __name__ == "__main__":
